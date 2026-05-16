@@ -6,9 +6,9 @@ app.use(express.json());
 const CONFIG = {
   ZAPI_INSTANCE:     '3F32B071F907731481F89EB43ACFB5D4',
   ZAPI_TOKEN:        'DDE1060134ECCBC0FA9651F4',
+  ZAPI_CLIENT_TOKEN: 'F6ec5939af18c4791b01db16b2342ed3bS',
   ZAPI_API_URL:      'https://api.z-api.io/instances',
   LEOPOLDO_WHATSAPP: '5583981778623',
-  HOTMART_LINK:      'https://go.hotmart.com/metodo-m33d', // substituir pelo link real
 };
 
 // ─── FLUXO DE CONVERSA ────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ Menos que uma consulta. Menos que um exame. Menos que um mês de remédio.
 
 E o resultado é definitivo — porque ataca a causa, não o sintoma.
 
-Quer o link de acesso agora?`,
+Quer conversar diretamente com o Leopoldo para tirar suas dúvidas e garantir sua vaga?`,
 
   OBJECTIONS: {
     caro: `Entendo.
@@ -123,7 +123,7 @@ Faz sentido encarar assim?`,
 
     pensar: `Claro, sem pressão!
 
-Me diz uma coisa: o que vocà ainda precisa entender pra tomar essa decisão?
+Me diz uma coisa: o que você ainda precisa entender pra tomar essa decisão?
 
 Pode me perguntar agora — prefiro resolver sua dúvida do que te deixar com algo na cabeça.`,
 
@@ -149,8 +149,6 @@ Quer que eu te mande um caso real de alguém com o mesmo perfil que o seu?`,
 };
 
 // ─── SESSÕES ─────────────────────────────────────────────────────────────────
-// Estrutura: phone → { step, expiry, profile }
-// step: 'MSG1_SENT' | 'MSG2_SENT' | 'MSG5_SENT' | 'LINK_SENT' | 'DONE'
 const sessions = new Map();
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -159,7 +157,10 @@ async function sendWhatsApp(phone, text) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Client-Token': CONFIG.ZAPI_CLIENT_TOKEN,
+      },
       body: JSON.stringify({ phone, message: text }),
     });
     const data = await res.json();
@@ -205,28 +206,23 @@ async function processFlow(phone, message) {
 
   let session = sessions.get(phone);
 
-  // Sessão expirada ou nova
   if (!session || session.expiry < now) {
-    // Inicia fluxo — envia MSG1
     sessions.set(phone, { step: 'MSG1_SENT', expiry: now + EXPIRY });
     await sendWhatsApp(phone, FLOW.MSG1);
     return;
   }
 
-  // Renova timer
   session.expiry = now + EXPIRY;
 
   switch (session.step) {
 
     case 'MSG1_SENT': {
-      // Qualquer resposta → envia MSG2 (história + qualificação)
       session.step = 'MSG2_SENT';
       await sendWhatsApp(phone, FLOW.MSG2);
       break;
     }
 
     case 'MSG2_SENT': {
-      // Espera escolha 1-4
       const choice = extractChoice(message);
       if (choice && FLOW.MSG4[choice]) {
         session.step = 'MSG5_SENT';
@@ -235,39 +231,33 @@ async function processFlow(phone, message) {
         await delay(1200);
         await sendWhatsApp(phone, FLOW.MSG5);
       } else {
-        // Não entendeu a opção — repete instrução
         await sendWhatsApp(phone, 'Só digita o número da opção: 1️⃣ 2️⃣ 3️⃣ ou 4️⃣ 👇');
       }
       break;
     }
 
     case 'MSG5_SENT': {
-      // Espera resposta sobre querer o link
       const objection = detectObjection(message);
       if (objection && FLOW.OBJECTIONS[objection]) {
         await sendWhatsApp(phone, FLOW.OBJECTIONS[objection]);
-        // Mantém no step MSG5_SENT para continuar tratando objeções
       } else if (isPositive(message) || message.trim() === 'sim') {
         session.step = 'LINK_SENT';
-        const linkMsg = `Perfeito! 🎯\n\nAqui está o seu acesso direto:\n👉 ${CONFIG.HOTMART_LINK}\n\n⚠️ Condição especial de R$197 — preço regular é R$297.\n\nQualquer dúvida no pagamento, me chama aqui. ✅`;
+        const linkMsg = `Perfeito! 🎯\n\nO Leopoldo vai te atender pessoalmente agora.\n\n👉 Clique aqui para conversar com ele diretamente:\nhttps://wa.me/5583981778623\n\nEle está esperando você. ✅`;
         await sendWhatsApp(phone, linkMsg);
         await delay(1000);
         await notifyLeopoldo(phone);
       } else {
-        // Outra resposta — trata como dúvida
         await sendWhatsApp(phone, 'Me conta mais — o que ficou na cabeça? Prefiro tirar sua dúvida agora. 😊');
       }
       break;
     }
 
     case 'LINK_SENT': {
-      // Lead já recebeu o link — qualquer mensagem → suporte
-      await sendWhatsApp(phone, 'Oi! Qualquer dúvida sobre o acesso ou pagamento, é só me falar aqui. Estou online ✅');
+      await sendWhatsApp(phone, 'Oi! Já passei seu contato pro Leopoldo. Ele vai te chamar em breve. Qualquer dúvida é só falar aqui! ✅');
       break;
     }
 
     default: {
-      // Reinicia fluxo
       sessions.delete(phone);
       await sendWhatsApp(phone, FLOW.MSG1);
     }
@@ -276,16 +266,14 @@ async function processFlow(phone, message) {
 
 // ─── WEBHOOK ──────────────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // responde imediatamente
+  res.sendStatus(200);
 
   try {
     const body = req.body;
     console.log('📩 Webhook:', JSON.stringify(body).substring(0, 400));
 
-    // Ignora mensagens enviadas pelo próprio bot / pelo número
     if (body.fromMe || body.fromApi) return;
 
-    // Extrai phone e message
     const phone   = body.phone || body.from?.replace('@s.whatsapp.net', '').replace(/\D/g, '');
     const message = body.text?.message || body.message || '';
 
@@ -307,12 +295,12 @@ app.get('/', (req, res) => {
   res.json({
     status: 'Robô M33D online ✅',
     sessions: sessions.size,
-    version: '2.0 — fluxo nativo',
+    version: '2.1 — lead direto para WhatsApp',
   });
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🤖 Robô M33D v2.0 rodando na porta ${PORT}`);
+  console.log(`🤖 Robô M33D v2.1 rodando na porta ${PORT}`);
 });
